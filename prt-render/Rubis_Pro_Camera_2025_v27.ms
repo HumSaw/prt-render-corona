@@ -2,13 +2,31 @@
     PRT Run - Corona Edition
     3ds Max 2025+
     Corona 11+ (works with the Corona version available for this 3ds Max release)
-    v0.27
+    v0.28
+
+    Changes in v0.28 (audit fixes):
+    - CANCEL/STOP now actually stops the camera queue (sets stopRequested).
+    - "Copy from Global" HWND search rewritten: windows.getChildHWND returns ONE
+      window's property array, not a window list; the old code never reached the
+      button. Now searches the HWND tree recursively by text, with a documented
+      direct-property fallback (colorMappingPipeline copy).
+    - "Use Corona VFB only" / "Duplicate to MAX frame buffer" / "Preview scale"
+      controls were dead; they are now wired into the render() calls.
+    - Render Element filenames and Active/Display flags are snapshotted before
+      the batch and restored afterwards (scene setup is no longer mutated).
+    - Render queue wrapped in try/catch: an error can no longer leave the
+      RENDER button permanently disabled.
+    - Viewport redraws are batched: one redraw per operation instead of a full
+      redraw per property per camera.
+    - Removed dead helpers (selectedOrActiveCamera with its forward-reference
+      bug, getCameraClassName); fixed double saveAnimUIToCamera; informational
+      Custom-aspect dialog uses messageBox instead of Yes/No queryBox.
 
     Changes:
     - Only the Corona VFB is used by the batch render call (native 3ds Max RFW is disabled).
     - All camera renders go directly into ONE selected output folder.
     - Optional Render Elements saving, with automatic filenames in the same folder.
-    - Fixed dialog height: createDialog now matches the rollout height (930), and the window is vertically resizable.
+    - Fixed dialog height: createDialog now matches the rollout height (925), and the window is vertically resizable.
     - Output aspect ratio presets + custom ratio.
     - Optional "Lock aspect ratio" applies to all cameras because output resolution is global.
     - MacroScript included in this file: category "PRT Render".
@@ -401,6 +419,49 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         try mgr.SetDisplayElements false catch()
     )
 
+    /*
+        v0.28: configureElementOutputs permanently rewrote the scene's Render
+        Element filenames and Active/Display flags. These two functions
+        snapshot the state before the batch and restore it afterwards, so a
+        batch render no longer mutates the user's scene setup.
+    */
+    fn snapshotElementOutputs =
+    (
+        local mgr = maxOps.GetCurRenderElementMgr()
+        if mgr == undefined then return undefined
+
+        local names = #()
+        local count = mgr.NumRenderElements()
+        for i = 0 to count - 1 do
+        (
+            local fname = ""
+            try (fname = mgr.GetRenderElementFilename i) catch()
+            append names fname
+        )
+
+        local active = true
+        local display = true
+        try (active = mgr.GetElementsActive()) catch()
+        try (display = mgr.GetDisplayElements()) catch()
+        #(names, active, display)
+    )
+
+    fn restoreElementOutputs snap =
+    (
+        if snap == undefined then return()
+        local mgr = maxOps.GetCurRenderElementMgr()
+        if mgr == undefined then return()
+
+        local names = snap[1]
+        local count = mgr.NumRenderElements()
+        for i = 0 to count - 1 do
+            if i + 1 <= names.count do
+                try (mgr.SetRenderElementFilename i names[i + 1]) catch()
+
+        try (mgr.SetElementsActive snap[2]) catch()
+        try (mgr.SetDisplayElements snap[3]) catch()
+    )
+
     fn setPropSafe obj prop value =
     (
         try
@@ -423,12 +484,6 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         )
         catch defaultValue
     )
-
-    fn getCameraClassName cam =
-    (
-        try (classOf cam as string) catch ""
-    )
-
 
     fn findFirstProperty cam candidates =
     (
@@ -462,26 +517,27 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         sw / (2.0 * tan (fov / 2.0))
     )
 
-    fn setCameraFocal cam value =
+    -- v0.28: property setters accept redraw:false so batch operations
+    -- (many cameras / many properties) trigger ONE viewport redraw instead
+    -- of a full redraw per property per camera.
+    fn setCameraFocal cam value redraw:true =
     (
+        local ok = false
         local p = findFirstProperty cam #(#focal_length_mm, #focalLength, #focal_length, #lens)
-        if p != undefined and setPropSafe cam p value then
+        if p != undefined and setPropSafe cam p value then ok = true
+        else
         (
-            try (updateCameraUI cam) catch()
-            forceCompleteRedraw()
-            try (viewport.redraw()) catch()
-            return true
+            local fovP = findFirstProperty cam #(#fov, #fieldOfView, #field_of_view)
+            if fovP != undefined and setPropSafe cam fovP (focalToFov cam value) then ok = true
         )
 
-        local fovP = findFirstProperty cam #(#fov, #fieldOfView, #field_of_view)
-        if fovP != undefined and setPropSafe cam fovP (focalToFov cam value) then
+        if ok and redraw do
         (
             try (updateCameraUI cam) catch()
             forceCompleteRedraw()
             try (viewport.redraw()) catch()
-            return true
         )
-        false
+        ok
     )
 
     fn getCameraFocal cam =
@@ -501,36 +557,45 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         undefined
     )
 
-    fn setCameraClipEnabled cam state =
+    fn setCameraClipEnabled cam state redraw:true =
     (
         local ok = false
         for q in #(#clipManually, #clip_on, #clipEnabled, #clippingEnabled) do
             if isProperty cam q then ok = (setPropSafe cam q state) or ok
-        try (updateCameraUI cam) catch()
-        forceCompleteRedraw()
-        try (viewport.redraw()) catch()
+        if redraw do
+        (
+            try (updateCameraUI cam) catch()
+            forceCompleteRedraw()
+            try (viewport.redraw()) catch()
+        )
         ok
     )
 
-    fn setCameraNearClip cam value =
+    fn setCameraNearClip cam value redraw:true =
     (
         local ok = false
         for q in #(#nearclip, #clip_near, #near_clip, #clipNear, #clippingNear) do
             if isProperty cam q then ok = (setPropSafe cam q value) or ok
-        try (updateCameraUI cam) catch()
-        forceCompleteRedraw()
-        try (viewport.redraw()) catch()
+        if redraw do
+        (
+            try (updateCameraUI cam) catch()
+            forceCompleteRedraw()
+            try (viewport.redraw()) catch()
+        )
         ok
     )
 
-    fn setCameraFarClip cam value =
+    fn setCameraFarClip cam value redraw:true =
     (
         local ok = false
         for q in #(#farclip, #clip_far, #far_clip, #clipFar, #clippingFar) do
             if isProperty cam q then ok = (setPropSafe cam q value) or ok
-        try (updateCameraUI cam) catch()
-        forceCompleteRedraw()
-        try (viewport.redraw()) catch()
+        if redraw do
+        (
+            try (updateCameraUI cam) catch()
+            forceCompleteRedraw()
+            try (viewport.redraw()) catch()
+        )
         ok
     )
 
@@ -615,8 +680,14 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         )
     )
 
-    fn findChildByText parentHwnd wantedText =
+    fn findChildByText parentHwnd wantedText depth:0 =
     (
+        /*
+            Recursive HWND-tree search by window text.
+            Depth-limited so a pathological window tree cannot hang the UI.
+        */
+        if depth > 8 then return undefined
+
         local result = undefined
         local children = undefined
 
@@ -627,13 +698,15 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
 
         for w in children while result == undefined do
         (
-            if w.count >= 5 then
+            if classOf w == Array and w.count >= 5 then
             (
                 local txt = ""
                 try (txt = w[5] as string) catch()
 
                 if (toLower txt) == wanted then
                     result = w
+                else
+                    result = findChildByText w[1] wantedText depth:(depth + 1)
             )
         )
         result
@@ -656,22 +729,34 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
             select cam
             completeRedraw()
 
-            local camWnd = windows.getChildHWND #max cam.name
-            if camWnd == undefined then return false
+            /*
+                NOTE (version portability): earlier revisions assumed the Corona
+                Camera modifier rollout was always the 7th child window
+                (camWnd[7]). That index is NOT guaranteed to be stable across
+                3ds Max versions/UI builds (2020-2026).
 
-            -- NOTE (version portability): earlier revisions of this script assumed
-            -- the Corona Camera modifier rollout was always the 7th child window
-            -- (camWnd[7]). That index is NOT guaranteed to be stable across 3ds Max
-            -- versions/UI builds (2020-2026), including the Qt-based command panel
-            -- changes introduced in later releases. Instead we scan every child of
-            -- the camera's window group and look for the "Copy from global" button
-            -- by its text, which is far more resilient to index shifts.
+                FIX (v0.28): windows.getChildHWND returns a FLAT property array
+                describing ONE window (#(hwnd, parent, class, ..., text, ...)),
+                not a list of windows. The previous `for w in camWnd` iterated
+                over scalar properties and always threw (silently swallowed by
+                the outer catch), so the button was never found. We now search
+                the command panel's HWND tree recursively by button text,
+                starting from the Modify panel root.
+            */
             local btn = undefined
-            for w in camWnd while btn == undefined do
+            local panelRoot = undefined
+            try (panelRoot = windows.getChildHWND #max "Command Panel") catch()
+
+            local searchRoots = #()
+            if panelRoot != undefined do append searchRoots panelRoot[1]
+            local camWnd = windows.getChildHWND #max cam.name
+            if camWnd != undefined do append searchRoots camWnd[1]
+
+            for root in searchRoots while btn == undefined do
             (
-                btn = findChildByText w[1] "Copy from global"
+                btn = findChildByText root "Copy from global"
                 -- Some Corona builds capitalize Global.
-                if btn == undefined do btn = findChildByText w[1] "Copy from Global"
+                if btn == undefined do btn = findChildByText root "Copy from Global"
             )
 
             if btn == undefined then
@@ -700,7 +785,7 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
             return false
         )
 
-        -- IMPORTANT: use Corona's actual Camera UI command.
+        -- IMPORTANT: prefer Corona's actual Camera UI command.
         if clickCoronaCopyFromGlobalUI cam then
         (
             try (cam.colorMappingOverride = true) catch()
@@ -709,7 +794,27 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         )
         else
         (
-            false
+            /*
+                FALLBACK (v0.28): if the native UI button cannot be reached
+                (Qt/Win32 layout differences, panel not open, localized UI),
+                assign the documented Corona properties directly:
+                    cam.colorMappingPipeline = renderers.current.colormap_pipeline
+                    cam.colorMappingOverride = true
+                This is the workflow Chaos documents for per-camera tone mapping.
+            */
+            local ok = false
+            try
+            (
+                local pipe = getGlobalTMPipeline()
+                if pipe != undefined and (setCameraTMPipeline cam pipe) then
+                (
+                    cam.colorMappingOverride = true
+                    showCameraInViewport cam
+                    ok = true
+                )
+            )
+            catch (ok = false)
+            ok
         )
     )
 
@@ -748,16 +853,12 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         )
     )
 
-    fn selectedOrActiveCamera =
-    (
-        local cams = selectedCameraNodes()
-        if cams.count > 0 then cams[1]
-        else
-        (
-            try (if isKindOf viewport.getCamera() Camera then viewport.getCamera() else undefined) catch undefined
-        )
-    )
-
+    /*
+        v0.28: removed dead helper `selectedOrActiveCamera` - it was never
+        called and contained a forward reference to `selectedCameraNodes`,
+        which MAXScript resolves to an (undefined) global at parse time and
+        would therefore throw at runtime if it were ever invoked.
+    */
     fn selectedCameraNodes =
     (
         local result = #()
@@ -796,11 +897,16 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         local applied = 0
         for c in cams do
         (
-            local okF = setCameraFocal c spFocal.value
-            local okC = setCameraClipEnabled c chkClip.checked
-            local okN = setCameraNearClip c spNear.value
-            local okFar = setCameraFarClip c spFar.value
-            if okF or okC or okN or okFar do applied += 1
+            -- redraw:false = one viewport redraw for the whole batch (below)
+            local okF = setCameraFocal c spFocal.value redraw:false
+            local okC = setCameraClipEnabled c chkClip.checked redraw:false
+            local okN = setCameraNearClip c spNear.value redraw:false
+            local okFar = setCameraFarClip c spFar.value redraw:false
+            if okF or okC or okN or okFar do
+            (
+                applied += 1
+                try (updateCameraUI c) catch()
+            )
         )
 
         forceCompleteRedraw()
@@ -821,6 +927,25 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         forceCompleteRedraw()
     )
 
+    /*
+        v0.28: "Preview scale" dropdown is now functional. It scales the
+        effective render resolution for quick draft renders.
+    */
+    fn previewScaleFactor =
+    (
+        case ddlPreview.selection of
+        (
+            1: 1.0
+            2: 0.75
+            3: 0.62
+            4: 0.5
+            5: 0.31
+            6: 0.15
+            7: 0.07
+            default: 1.0
+        )
+    )
+
     fn renderOneCamera cam =
     (
         if stopRequested then return false
@@ -836,6 +961,20 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         local oldTime = sliderTime
         local ok = true
         local wasCancelled = false
+
+        /*
+            v0.28: previously-dead UI controls are now wired up:
+            - "Use Corona VFB only"  -> suppresses the MAX frame buffer
+            - "Duplicate to MAX frame buffer" -> vfb:true on render()
+            - "Preview scale" -> scales the effective output resolution
+        */
+        local useMaxVfb = chkDuplicate.checked and not chkVFB.checked
+        local scale = previewScaleFactor()
+        local baseW = if chkSize.checked then spW.value else renderWidth
+        local baseH = if chkSize.checked then spH.value else renderHeight
+        local effW = amax 1 ((baseW * scale) as integer)
+        local effH = amax 1 ((baseH * scale) as integer)
+        local useOutputSize = chkSize.checked or scale != 1.0
 
         if chkElements.checked do configureElementOutputs folder cameraBase
 
@@ -865,34 +1004,34 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
                 local fr = interval camFrom camTo
                 if chkSave.checked then
                 (
-                    if chkSize.checked then
-                        render camera:cam framerange:fr outputfile:outputFile outputSize:[spW.value,spH.value] vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                    if useOutputSize then
+                        render camera:cam framerange:fr outputfile:outputFile outputSize:[effW,effH] vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                     else
-                        render camera:cam framerange:fr outputfile:outputFile vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                        render camera:cam framerange:fr outputfile:outputFile vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                 )
                 else
                 (
-                    if chkSize.checked then
-                        render camera:cam framerange:fr outputSize:[spW.value,spH.value] vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                    if useOutputSize then
+                        render camera:cam framerange:fr outputSize:[effW,effH] vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                     else
-                        render camera:cam framerange:fr vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                        render camera:cam framerange:fr vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                 )
             )
             else
             (
                 if chkSave.checked then
                 (
-                    if chkSize.checked then
-                        render camera:cam frame:oldTime outputfile:outputFile outputSize:[spW.value,spH.value] vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                    if useOutputSize then
+                        render camera:cam frame:oldTime outputfile:outputFile outputSize:[effW,effH] vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                     else
-                        render camera:cam frame:oldTime outputfile:outputFile vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                        render camera:cam frame:oldTime outputfile:outputFile vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                 )
                 else
                 (
-                    if chkSize.checked then
-                        render camera:cam frame:oldTime outputSize:[spW.value,spH.value] vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                    if useOutputSize then
+                        render camera:cam frame:oldTime outputSize:[effW,effH] vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                     else
-                        render camera:cam frame:oldTime vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                        render camera:cam frame:oldTime vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                 )
             )
         )
@@ -986,22 +1125,44 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         local total = lbCameras.items.count
         local completed = 0
 
-        for i = 1 to total while not stopRequested do
+        /*
+            v0.28:
+            - Element output filenames/flags are snapshotted and restored, so
+              batch rendering no longer permanently rewrites the scene setup.
+            - The queue loop is wrapped in try/catch: an unexpected error can
+              no longer leave the RENDER button permanently disabled.
+        */
+        local elemSnap = if chkElements.checked then snapshotElementOutputs() else undefined
+        local queueError = false
+
+        try
         (
-            local cam = getCameraByName lbCameras.items[i]
-            if cam != undefined then
+            for i = 1 to total while not stopRequested do
             (
-                lblStatus.text = ("Rendering " + (i as string) + "/" + (total as string) + ": " + cam.name)
-                pbProgress.value = ((i - 1) * 100.0 / total) as integer
-                if renderOneCamera cam then completed += 1
+                local cam = getCameraByName lbCameras.items[i]
+                if cam != undefined then
+                (
+                    lblStatus.text = ("Rendering " + (i as string) + "/" + (total as string) + ": " + cam.name)
+                    pbProgress.value = ((i - 1) * 100.0 / total) as integer
+                    if renderOneCamera cam then completed += 1
+                )
             )
         )
+        catch
+        (
+            queueError = true
+            format "PRT Render: queue aborted by error: %\n" (getCurrentException())
+        )
+
+        restoreElementOutputs elemSnap
 
         pbProgress.value = 100
         btnRender.enabled = true
         btnStop.enabled = false
 
-        if stopRequested then
+        if queueError then
+            lblStatus.text = ("Render stopped by an error. Completed: " + (completed as string) + "/" + (total as string) + ". See MAXScript Listener.")
+        else if stopRequested then
             lblStatus.text = ("Render cancelled. Completed: " + (completed as string) + "/" + (total as string))
         else
         (
@@ -1079,7 +1240,6 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         )
         else
         (
-            saveAnimUIToCamera cams[1]
             spFrom.enabled = state
             spTo.enabled = state
             if spTo.value < spFrom.value then spTo.value = spFrom.value
@@ -1122,7 +1282,8 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
     on ddlAspect selected i do
     (
         if i == 8 then
-            queryBox "Custom aspect uses current Width / Height. Lock ratio only controls automatic W/H coupling." title:"PRT Render"
+            -- v0.28: informational message, not a Yes/No question (was queryBox).
+            messageBox "Custom aspect uses current Width / Height. Lock ratio only controls automatic W/H coupling." title:"PRT Render"
         else
         (
             applySelectedAspect()
@@ -1155,12 +1316,15 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
     (
         /*
             This button cannot interrupt a synchronous render() call because
-            3ds Max is executing the render on its main thread.
-            The actual cancellation is performed by MAX/Corona's render
-            progress Cancel button or ESC. Once render() returns, v0.5
-            detects cancelled:&wasCancelled and stops the queue.
+            3ds Max is executing the render on its main thread. The ACTIVE
+            frame is cancelled with MAX/Corona's render progress Cancel button
+            or ESC (detected via cancelled:&wasCancelled).
+
+            However, this button CAN and now DOES stop the camera QUEUE:
+            stopRequested halts the batch loop before the next camera starts.
         */
-        lblStatus.text = "Use Cancel in the render progress dialog or press ESC."
+        stopRequested = true
+        lblStatus.text = "Stop requested: queue halts after the current render. Use Cancel/ESC to abort the active frame."
     )
 
     on lbCameras selected i do
@@ -1214,7 +1378,7 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
     on spFocal changed v do
     (
         local cams = selectedCameraNodes()
-        for c in cams do setCameraFocal c v
+        for c in cams do setCameraFocal c v redraw:false
         if cams.count > 0 then
         (
             try (select cams[1]) catch()
@@ -1227,7 +1391,12 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
     on chkClip changed state do
     (
         local cams = selectedCameraNodes()
-        for c in cams do setCameraClipEnabled c state
+        for c in cams do setCameraClipEnabled c state redraw:false
+        if cams.count > 0 do
+        (
+            forceCompleteRedraw()
+            try (viewport.redraw()) catch()
+        )
         if state then
             lblCamInfo.text = "Clipping ON - Near/Far are live."
         else
@@ -1239,7 +1408,7 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         if chkClip.checked then
         (
             local cams = selectedCameraNodes()
-            for c in cams do setCameraNearClip c v
+            for c in cams do setCameraNearClip c v redraw:false
             try (viewport.redraw()) catch()
         )
     )
@@ -1249,7 +1418,7 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         if chkClip.checked then
         (
             local cams = selectedCameraNodes()
-            for c in cams do setCameraFarClip c v
+            for c in cams do setCameraFarClip c v redraw:false
             try (viewport.redraw()) catch()
         )
     )

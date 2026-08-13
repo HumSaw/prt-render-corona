@@ -2,13 +2,31 @@
     PRT Run - Corona Edition
     3ds Max 2020
     Corona 11+ (works with the Corona version available for this 3ds Max release)
-    v0.27
+    v0.28
 
-    Changes:
+    Changes in v0.28 (audit fixes):
+    - CANCEL/STOP now actually stops the camera queue (sets stopRequested).
+    - "Copy from Global" HWND search rewritten: windows.getChildHWND returns ONE
+      window's property array, not a window list; the old loop always threw and
+      the click never happened. Now searches the HWND tree recursively by text,
+      with a documented direct-property fallback (colorMappingPipeline copy).
+    - "Use Corona VFB only" / "Duplicate to MAX frame buffer" / "Preview scale"
+      controls were dead; they are now wired into the render() calls.
+    - Render Element filenames and Active/Display flags are snapshotted before
+      the batch and restored afterwards (scene setup is no longer mutated).
+    - Render queue wrapped in try/catch: an error can no longer leave the
+      RENDER button permanently disabled.
+    - Viewport redraws are batched: one redraw per operation instead of a full
+      redraw per property per camera.
+    - Removed dead helpers (selectedOrActiveCamera with its forward-reference
+      bug, getCameraClassName); fixed double saveAnimUIToCamera; informational
+      Custom-aspect dialog uses messageBox instead of Yes/No queryBox.
+
+    Changes (v0.27):
     - Only the Corona VFB is used by the batch render call (native 3ds Max RFW is disabled).
     - All camera renders go directly into ONE selected output folder.
     - Optional Render Elements saving, with automatic filenames in the same folder.
-    - Fixed dialog height: createDialog now matches the rollout height (930), and the window is vertically resizable.
+    - Fixed dialog height: createDialog now matches the rollout height (925), and the window is vertically resizable.
     - Output aspect ratio presets + custom ratio.
     - Optional "Lock aspect ratio" applies to all cameras because output resolution is global.
     - MacroScript included in this file: category "PRT Render".
@@ -396,6 +414,49 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         )
         try mgr.SetElementsActive true catch()
         try mgr.SetDisplayElements false catch()
+    )
+
+    /*
+        v0.28: configureElementOutputs permanently rewrote the scene's Render
+        Element filenames and Active/Display flags. These two functions
+        snapshot the state before the batch and restore it afterwards, so a
+        batch render no longer mutates the user's scene setup.
+    */
+    fn snapshotElementOutputs =
+    (
+        local mgr = maxOps.GetCurRenderElementMgr()
+        if mgr == undefined then return undefined
+
+        local names = #()
+        local count = mgr.NumRenderElements()
+        for i = 0 to count - 1 do
+        (
+            local fname = ""
+            try (fname = mgr.GetRenderElementFilename i) catch()
+            append names fname
+        )
+
+        local active = true
+        local display = true
+        try (active = mgr.GetElementsActive()) catch()
+        try (display = mgr.GetDisplayElements()) catch()
+        #(names, active, display)
+    )
+
+    fn restoreElementOutputs snap =
+    (
+        if snap == undefined then return()
+        local mgr = maxOps.GetCurRenderElementMgr()
+        if mgr == undefined then return()
+
+        local names = snap[1]
+        local count = mgr.NumRenderElements()
+        for i = 0 to count - 1 do
+            if i + 1 <= names.count do
+                try (mgr.SetRenderElementFilename i names[i + 1]) catch()
+
+        try (mgr.SetElementsActive snap[2]) catch()
+        try (mgr.SetDisplayElements snap[3]) catch()
     )
 
     fn setPropSafe obj prop value =
@@ -863,6 +924,25 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         forceCompleteRedraw()
     )
 
+    /*
+        v0.28: "Preview scale" dropdown is now functional. It scales the
+        effective render resolution for quick draft renders.
+    */
+    fn previewScaleFactor =
+    (
+        case ddlPreview.selection of
+        (
+            1: 1.0
+            2: 0.75
+            3: 0.62
+            4: 0.5
+            5: 0.31
+            6: 0.15
+            7: 0.07
+            default: 1.0
+        )
+    )
+
     fn renderOneCamera cam =
     (
         if stopRequested then return false
@@ -878,6 +958,20 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         local oldTime = sliderTime
         local ok = true
         local wasCancelled = false
+
+        /*
+            v0.28: previously-dead UI controls are now wired up:
+            - "Use Corona VFB only"  -> suppresses the MAX frame buffer
+            - "Duplicate to MAX frame buffer" -> vfb:true on render()
+            - "Preview scale" -> scales the effective output resolution
+        */
+        local useMaxVfb = chkDuplicate.checked and not chkVFB.checked
+        local scale = previewScaleFactor()
+        local baseW = if chkSize.checked then spW.value else renderWidth
+        local baseH = if chkSize.checked then spH.value else renderHeight
+        local effW = amax 1 ((baseW * scale) as integer)
+        local effH = amax 1 ((baseH * scale) as integer)
+        local useOutputSize = chkSize.checked or scale != 1.0
 
         if chkElements.checked do configureElementOutputs folder cameraBase
 
@@ -907,34 +1001,34 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
                 local fr = interval camFrom camTo
                 if chkSave.checked then
                 (
-                    if chkSize.checked then
-                        render camera:cam framerange:fr outputfile:outputFile outputSize:[spW.value,spH.value] vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                    if useOutputSize then
+                        render camera:cam framerange:fr outputfile:outputFile outputSize:[effW,effH] vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                     else
-                        render camera:cam framerange:fr outputfile:outputFile vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                        render camera:cam framerange:fr outputfile:outputFile vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                 )
                 else
                 (
-                    if chkSize.checked then
-                        render camera:cam framerange:fr outputSize:[spW.value,spH.value] vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                    if useOutputSize then
+                        render camera:cam framerange:fr outputSize:[effW,effH] vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                     else
-                        render camera:cam framerange:fr vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                        render camera:cam framerange:fr vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                 )
             )
             else
             (
                 if chkSave.checked then
                 (
-                    if chkSize.checked then
-                        render camera:cam frame:oldTime outputfile:outputFile outputSize:[spW.value,spH.value] vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                    if useOutputSize then
+                        render camera:cam frame:oldTime outputfile:outputFile outputSize:[effW,effH] vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                     else
-                        render camera:cam frame:oldTime outputfile:outputFile vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                        render camera:cam frame:oldTime outputfile:outputFile vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                 )
                 else
                 (
-                    if chkSize.checked then
-                        render camera:cam frame:oldTime outputSize:[spW.value,spH.value] vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                    if useOutputSize then
+                        render camera:cam frame:oldTime outputSize:[effW,effH] vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                     else
-                        render camera:cam frame:oldTime vfb:false renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
+                        render camera:cam frame:oldTime vfb:useMaxVfb renderElements:chkElements.checked progressbar:true cancelled:&wasCancelled
                 )
             )
         )
@@ -1028,22 +1122,44 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         local total = lbCameras.items.count
         local completed = 0
 
-        for i = 1 to total while not stopRequested do
+        /*
+            v0.28:
+            - Element output filenames/flags are snapshotted and restored, so
+              batch rendering no longer permanently rewrites the scene setup.
+            - The queue loop is wrapped in try/catch: an unexpected error can
+              no longer leave the RENDER button permanently disabled.
+        */
+        local elemSnap = if chkElements.checked then snapshotElementOutputs() else undefined
+        local queueError = false
+
+        try
         (
-            local cam = getCameraByName lbCameras.items[i]
-            if cam != undefined then
+            for i = 1 to total while not stopRequested do
             (
-                lblStatus.text = ("Rendering " + (i as string) + "/" + (total as string) + ": " + cam.name)
-                pbProgress.value = ((i - 1) * 100.0 / total) as integer
-                if renderOneCamera cam then completed += 1
+                local cam = getCameraByName lbCameras.items[i]
+                if cam != undefined then
+                (
+                    lblStatus.text = ("Rendering " + (i as string) + "/" + (total as string) + ": " + cam.name)
+                    pbProgress.value = ((i - 1) * 100.0 / total) as integer
+                    if renderOneCamera cam then completed += 1
+                )
             )
         )
+        catch
+        (
+            queueError = true
+            format "PRT Render: queue aborted by error: %\n" (getCurrentException())
+        )
+
+        restoreElementOutputs elemSnap
 
         pbProgress.value = 100
         btnRender.enabled = true
         btnStop.enabled = false
 
-        if stopRequested then
+        if queueError then
+            lblStatus.text = ("Render stopped by an error. Completed: " + (completed as string) + "/" + (total as string) + ". See MAXScript Listener.")
+        else if stopRequested then
             lblStatus.text = ("Render cancelled. Completed: " + (completed as string) + "/" + (total as string))
         else
         (
@@ -1121,7 +1237,6 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
         )
         else
         (
-            saveAnimUIToCamera cams[1]
             spFrom.enabled = state
             spTo.enabled = state
             if spTo.value < spFrom.value then spTo.value = spFrom.value
@@ -1164,7 +1279,8 @@ rollout PRT_Corona_Renderer "PRT Render - Corona" width:560 height:925
     on ddlAspect selected i do
     (
         if i == 8 then
-            queryBox "Custom aspect uses current Width / Height. Lock ratio only controls automatic W/H coupling." title:"PRT Render"
+            -- v0.28: informational message, not a Yes/No question (was queryBox).
+            messageBox "Custom aspect uses current Width / Height. Lock ratio only controls automatic W/H coupling." title:"PRT Render"
         else
         (
             applySelectedAspect()
