@@ -1,5 +1,7 @@
 # PRT Render — Corona
 
+[![CI](https://github.com/HumSaw/prt-render-corona/actions/workflows/ci.yml/badge.svg)](https://github.com/HumSaw/prt-render-corona/actions/workflows/ci.yml)
+
 Batch camera rendering for **Autodesk 3ds Max 2020–2026** and **Corona Renderer**, implemented in MAXScript.
 
 PRT Render turns a scene camera list into a controlled render queue: each camera can keep its own focal length, clipping, frame size, preview scale, animation range, and Corona tone-mapping override while all output lands in one predictable folder.
